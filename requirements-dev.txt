@@ -1,0 +1,11 @@
+# NOT needed to run anything: Airflow runs inside Docker, from the image apache/airflow:3.3.2.
+#
+# Only for VS Code on Windows: autocomplete, and no red underlines on "from airflow.sdk import ...".
+# Install it in a venv of this project, pinned to the same versions as the Docker image:
+#
+#   py -3.11 -m venv .venv
+#   .venv\Scripts\Activate.ps1
+#   pip install -r requirements-dev.txt --constraint https://raw.githubusercontent.com/apache/airflow/constraints-3.3.2/constraints-3.11.txt
+#
+# (Airflow does not RUN on Windows, so do not start it from this venv: it is only for the editor.)
+apache-airflow==3.3.2

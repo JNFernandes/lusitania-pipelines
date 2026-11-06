@@ -1,0 +1,10 @@
+# Lint settings for this project (run: ruff check .)
+line-length = 120
+target-version = "py311"
+extend-exclude = ["logs"]
+
+[lint]
+select = ["E", "W", "F", "I", "B", "UP"]
+
+[lint.isort]
+known-first-party = ["lusitania", "consumer"]

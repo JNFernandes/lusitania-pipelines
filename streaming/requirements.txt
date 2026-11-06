@@ -1,0 +1,8 @@
+# For the PRODUCER (streaming/producer.py), which runs on the laptop.
+# Install it in the Project 2 venv (the producer also uses the lusitania package and pyodbc):
+#
+#   C:\Projects\LusitaniaLakehouse\.venv\Scripts\Activate.ps1
+#   pip install -r streaming\requirements.txt
+confluent-kafka==2.16.1
+# perf_report.py: the graphs of the performance report
+matplotlib>=3.8

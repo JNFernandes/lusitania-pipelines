@@ -1,0 +1,17 @@
+# Secrets: the SQL Server password lives here (copy .env.example to create it)
+.env
+
+# Airflow writes its task logs here (kept on the laptop, never committed)
+logs/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Tool caches
+.pytest_cache/
+.ruff_cache/
+
+# pdf
+*.pdf

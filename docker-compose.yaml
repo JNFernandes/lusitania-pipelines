@@ -1,0 +1,250 @@
+# Apache Airflow 3.3.2 on a laptop: a trimmed version of the official docker-compose.yaml.
+#
+# The official file runs 7 containers for a server (Celery workers + Redis queue). Here the
+# LocalExecutor runs tasks inside the scheduler, so 5 containers are enough:
+#
+#   postgres               the METADATA DATABASE: every DAG run, task state, history
+#   airflow-init           runs ONCE at start-up: creates the database tables and the login user, then exits
+#   airflow-apiserver      the WEB UI (http://localhost:8080) and the API the tasks report to
+#   airflow-scheduler      decides what runs when, and runs the tasks (LocalExecutor)
+#   airflow-dag-processor  reads the files in dags/ and turns them into DAGs
+#
+# Start:   docker compose up -d        (-d = in the background)
+# Stop:    docker compose down         (data is kept in the postgres volume)
+# Reset:   docker compose down -v      (-v = also delete the database: a clean start)
+
+x-airflow-common: &airflow-common
+  # OUR image, built from the Dockerfile in this folder (official Airflow + Java + the pipeline's packages)
+  build: .
+  image: lusitania-airflow:3.3.2
+  environment: &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-apiserver:8080/execution/
+    AIRFLOW__API_AUTH__JWT_SECRET: lusitania-local-only-secret
+    AIRFLOW__API_AUTH__JWT_ISSUER: airflow
+    AIRFLOW__CORE__FERNET_KEY: ""
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"            # only our own DAGs in the UI
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"  # a new DAG waits until you switch it on
+    AIRFLOW__CORE__DEFAULT_TIMEZONE: Europe/Lisbon   # "06:00" in a schedule = 06:00 Lisbon time
+    AIRFLOW__DAG_PROCESSOR__REFRESH_INTERVAL: "30"   # look for new DAG files every 30 s (default 300)
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: "true"
+
+    # --- Lusitânia sources, as seen FROM INSIDE a container --------------------------
+    # Read by lusitania/config.py (Project 2). Inside a container "localhost" is the
+    # container itself; host.docker.internal is your laptop.
+    SQL_SERVER: host.docker.internal,1433
+    SQL_USER: ${SQL_USER:-lusitania_etl}          # the read-only login (piece 1)
+    SQL_PASSWORD: ${SQL_PASSWORD:?Create .env from .env.example and set SQL_PASSWORD}
+    MONGO_URI: mongodb://host.docker.internal:27017
+  volumes:
+    # folders on YOUR laptop, seen inside the containers: edit a DAG in VS Code → Airflow sees it
+    - ./dags:/opt/airflow/dags
+    - ./logs:/opt/airflow/logs
+    - ./config:/opt/airflow/config
+    - ./plugins:/opt/airflow/plugins
+    - ./include:/opt/airflow/include                 # helper scripts the DAGs call
+    # Project 2, the lakehouse: its code (src/), dbt project and data/ folder, used in place.
+    # The containers read and write the SAME data/ folder as your laptop runs.
+    - ../LusitaniaLakehouse:/opt/lakehouse
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on: &airflow-common-depends-on
+    postgres:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: always
+
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        mkdir -p /opt/airflow/{logs,dags,plugins,config}
+        /entrypoint airflow version
+        chown -R "${AIRFLOW_UID:-50000}:0" /opt/airflow/{logs,dags,plugins,config}
+    environment:
+      <<: *airflow-common-env
+      _AIRFLOW_DB_MIGRATE: "true"           # create / upgrade the metadata tables
+      _AIRFLOW_WWW_USER_CREATE: "true"      # create the login for the web UI
+      _AIRFLOW_WWW_USER_USERNAME: airflow
+      _AIRFLOW_WWW_USER_PASSWORD: airflow
+    user: "0:0"
+
+  airflow-apiserver:
+    <<: *airflow-common
+    command: api-server
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/api/v2/monitor/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type SchedulerJob --hostname "$${HOSTNAME}"']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    command: dag-processor
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type DagProcessorJob --hostname "$${HOSTNAME}"']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  # ======================================================================================
+  # PART B · STREAMING: Kafka (one broker), its topics, and a web UI to look inside
+  # ======================================================================================
+  kafka:
+    image: apache/kafka:4.4.0
+    hostname: kafka
+    ports:
+      - "9092:9092"            # for programs on your LAPTOP (the producer): localhost:9092
+    environment:
+      # KRaft mode: this one node is both the BROKER (stores events) and the CONTROLLER
+      # (manages the cluster). Since Kafka 4.0 there is no ZooKeeper.
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      CLUSTER_ID: lHpP-a9mQPK514xBtEnhJg
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093
+      # Two doors (listeners), because "where is Kafka?" has two answers:
+      #   from another container → kafka:19092      from the laptop → localhost:9092
+      KAFKA_LISTENERS: CONTROLLER://:29093,INTERNAL://:19092,EXTERNAL://:9092
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:19092,EXTERNAL://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      # One broker = no copies possible: replication factor 1 everywhere (production: 3)
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"   # topics are created on purpose (kafka-init), never by a typo
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+    volumes:
+      - kafka-data:/var/lib/kafka/data            # events survive `docker compose down`
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 15s
+    restart: always
+
+  kafka-init:
+    # Runs ONCE: creates the three topics with the settings each one needs, then exits.
+    # --if-not-exists: safe to run again (idempotent, like everything else in this project).
+    image: apache/kafka:4.4.0
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -e
+        T="/opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:19092 --if-not-exists"
+
+        # The live web orders: 3 partitions, keyed by order number, kept 7 days (cleanup = delete)
+        $$T --create --topic web_orders --partitions 3 --replication-factor 1 \
+            --config retention.ms=604800000
+
+        # Dead letter queue: events that could not be processed, with the reason. Kept 30 days.
+        $$T --create --topic web_orders_dlq --partitions 1 --replication-factor 1 \
+            --config retention.ms=2592000000
+
+        # Current status of each order: COMPACTED (only the latest event per key is kept;
+        # a tombstone, value = null, deletes the key). Small segments and a 1-minute
+        # tombstone delay so compaction is visible in a demo (production: hours, 24 h).
+        $$T --create --topic order_status --partitions 3 --replication-factor 1 \
+            --config cleanup.policy=compact \
+            --config segment.ms=10000 \
+            --config min.cleanable.dirty.ratio=0.01 \
+            --config delete.retention.ms=60000
+
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:19092 --describe
+
+  kafka-ui:
+    # A web page to look inside Kafka: topics, partitions, messages, consumer groups, LAG
+    image: ghcr.io/kafbat/kafka-ui:latest
+    ports:
+      - "8081:8080"            # http://localhost:8081 (8080 is already Airflow)
+    environment:
+      KAFKA_CLUSTERS_0_NAME: lusitania
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:19092
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: always
+
+  consumer:
+    # The streaming CONSUMER: reads Kafka and keeps the live Delta tables up to date, all the time.
+    # Not an Airflow task: Airflow runs tasks that finish; this never finishes.
+    # Same image as Airflow (it already has Java, Spark, Delta and now the Kafka connector).
+    build: .
+    image: lusitania-airflow:3.3.2
+    entrypoint: ["/opt/lusitania-venv/bin/python", "-m", "consumer.main"]
+    working_dir: /opt/streaming
+    environment:
+      PYTHONPATH: /opt/lakehouse/src:/opt/streaming   # Project 2's lusitania + the consumer package
+      PYTHONUNBUFFERED: "1"                          # log lines appear immediately
+      KAFKA_BOOTSTRAP: kafka:19092                   # the INTERNAL door
+      # tuning knobs for the performance experiments (defaults = the normal settings)
+      MAX_OFFSETS_PER_TRIGGER: ${MAX_OFFSETS_PER_TRIGGER:-500}
+      TRIGGER_INTERVAL: ${TRIGGER_INTERVAL:-10 seconds}
+    volumes:
+      - ../LusitaniaLakehouse:/opt/lakehouse         # writes to Project 2's data/stream/
+      - ./streaming:/opt/streaming
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    stop_grace_period: 60s                           # time to finish the current micro-batch
+
+volumes:
+  postgres-db-volume:
+  kafka-data:

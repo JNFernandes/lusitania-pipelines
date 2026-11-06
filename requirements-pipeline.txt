@@ -1,0 +1,16 @@
+# The packages the Lusitânia pipeline (Project 2) needs, installed INSIDE the Docker image
+# in their own environment, /opt/lusitania-venv (see Dockerfile). Not for the laptop.
+#
+# The same as Project 2's pyproject.toml: its dependencies + the dbt extra (without
+# dbt-databricks: the containers only build the local DuckDB gold).
+pyspark>=3.5.3,<3.6
+delta-spark>=3.3,<3.4
+pymongo>=4.6
+pyodbc>=5.0
+requests>=2.31
+python-dotenv>=1.0
+duckdb>=1.1
+dbt-core>=1.9,<2
+dbt-duckdb>=1.9
+# Kafka client for DAG 5 (include/stream_health.py): reads offsets, never consumes
+confluent-kafka==2.16.1
