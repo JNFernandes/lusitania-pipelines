@@ -5,7 +5,7 @@ The same retail business as [Project 1](https://github.com/JNFernandes/lusitania
 - **Part A, orchestration:** Apache Airflow runs Project 2's batch lakehouse (bronze → silver → gold) every morning, with retries, timeouts and alerts.
 - **Part B, streaming:** web-shop orders flow through Apache Kafka into live Delta tables within seconds, with Spark Structured Streaming. Airflow watches the stream's health.
 
-It all runs locally in Docker, at no cost, and reuses Project 2's code: Airflow and the consumer import the same `lusitania` package. Four experiments (spike, crash, tombstone, schema change) test the pipeline under failure, with measured results and graphs.
+It all runs locally in Docker, at no cost (and also on Azure, see [Run against Azure Event Hubs](#run-against-azure-event-hubs)), and reuses Project 2's code: Airflow and the consumer import the same `lusitania` package. Four experiments (spike, crash, tombstone, schema change) test the pipeline under failure, with measured results and graphs.
 
 <p>
   <img src="https://img.shields.io/badge/Airflow-3.3-017CEE?style=flat&logo=apacheairflow&logoColor=white" alt="Airflow"/>
@@ -207,13 +207,15 @@ Both versions ended up in the same table. Old rows read `coupon_code` as NULL. A
 
 ## Tests
 
-18 tests with pytest, run from Project 2's venv. Kafka is replaced by a folder of JSON files with Kafka's columns; everything after the source is the real code.
+27 tests with pytest, run from Project 2's venv. Kafka is replaced by a folder of JSON files with Kafka's columns; everything after the source is the real code.
 
 | File | Tests | Covers |
 |---|---|---|
 | `tests/test_consumer.py` | 7 | good, duplicate and broken events → live table and DLQ reasons; restart from the checkpoint; a redone batch written once; windows and the watermark; status MERGE with a tombstone; rates not loaded yet; schema v2 on an existing table |
 | `tests/test_stream_health.py` | 7 | DAG 5's checks: processed offsets from the checkpoint, lag maths, quiet shop vs stuck consumer, DLQ thresholds |
 | `tests/test_perf_report.py` | 4 | the metrics listener and the report's numbers and files |
+| `tests/test_eventhubs.py` | 4 | the Event Hubs switch: bootstrap from the connection string, SASL_SSL settings for the client and Spark, one variable switches everything |
+| `tests/test_cloudlake.py` | 5 | the cloud lake switch: `abfss://` paths, OAuth settings for Spark, the hadoop-azure version, every table pointed to the lake |
 
 ```powershell
 pytest tests
@@ -233,8 +235,12 @@ LusitaniaPipelines/
 ├── .env.example               SQL_USER / SQL_PASSWORD (copy to .env, never committed)
 ├── dags/                      01–05
 ├── include/                   check_sources.py, report_gold.py, stream_health.py (called by the DAGs)
+├── cloud/                     Dockerfile.consumer + build_consumer_image.ps1 (the consumer on Azure)
 ├── streaming/
 │   ├── producer.py            the simulated web shop
+│   ├── eventhubs.py           switch to Azure Event Hubs (EVENTHUBS_CONNECTION_STRING)
+│   ├── cloudlake.py           switch to the Azure data lake (LAKE_ACCOUNT)
+│   ├── cloud_env.ps1          cloud mode for one PowerShell window, secrets from Key Vault
 │   ├── consumer/              main, orders, totals, status, metrics, settings
 │   ├── look_stream.py         quick look at the live tables (DuckDB)
 │   └── perf_report.py         graphs and tables from the metrics
@@ -278,6 +284,28 @@ $env:MAX_OFFSETS_PER_TRIGGER=2000; docker compose up -d consumer              # 
 ```
 
 **Stop:** `docker compose down` keeps the data; `docker compose down -v` also deletes Kafka's and Airflow's volumes.
+
+---
+
+## Run against Azure Event Hubs
+
+The same code also runs on Azure. [Project 4](https://github.com/JNFernandes/lusitania-azure) creates the infrastructure with Terraform: Event Hubs instead of Kafka, ADLS Gen2 instead of the laptop folder, and the consumer in Azure Container Apps.
+
+Two environment variables switch each part, and nothing else changes:
+
+| Variable | Not set | Set |
+|---|---|---|
+| `EVENTHUBS_CONNECTION_STRING` | local Kafka on `localhost:9092` | Event Hubs' Kafka endpoint (port 9093, SASL_SSL); compression off, since Standard tier doesn't accept it |
+| `LAKE_ACCOUNT` (+ `LAKE_TENANT_ID`, `LAKE_CLIENT_ID`, `LAKE_CLIENT_SECRET`) | Delta tables in Project 2's `data/stream/` | Delta tables in `abfss://stream@<account>.dfs.core.windows.net/`, Spark logging in as a service principal |
+
+```powershell
+. .\streaming\cloud_env.ps1                     # reads the secrets from Key Vault into THIS window only
+python streaming\producer.py --rate 2 --duration 120
+python streaming\look_stream.py                  # reads the cloud tables (DuckDB + az login)
+. .\streaming\cloud_env.ps1 -Off                # back to local
+```
+
+The consumer runs either in Docker on the laptop (`docker compose up -d consumer`, same window) or in Azure Container Apps (`cloud\build_consumer_image.ps1`, then Project 4's `terraform apply -var deploy_consumer=true`). In Azure, 238 of 238 orders reached the live table, with 0 duplicates.
 
 ---
 
