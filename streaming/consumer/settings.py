@@ -1,6 +1,7 @@
 """Every name, path and tuning knob of the consumer, in one place."""
 import os
 
+import cloudlake
 import eventhubs
 from lusitania import config
 
@@ -18,17 +19,27 @@ ORDERS_TOPIC = "web_orders"
 STATUS_TOPIC = "order_status"
 DLQ_TOPIC = "web_orders_dlq"
 
-# --- Delta tables: in Project 2's data/ folder, next to bronze and silver ----------------
-STREAM_DIR = config.DATA_DIR / eventhubs.stream_folder()   # stream/ or stream_eventhubs/
-LIVE_TABLE = STREAM_DIR / "online_orders_live"
-TOTALS_TABLE = STREAM_DIR / "sales_per_5_minutes"
-STATUS_TABLE = STREAM_DIR / "order_status_current"
-CHECKPOINTS = STREAM_DIR / "_checkpoints"            # one sub-folder per job: its offsets and state
-METRICS_DIR = STREAM_DIR / "_metrics"                # performance records (consumer + producer)
+# --- Delta tables: on the laptop (Project 2's data/ folder) or in the cloud lake ----------
+LAKE = cloudlake.account()                                  # empty = laptop
+_FOLDER = eventhubs.stream_folder()                         # stream/ or stream_eventhubs/
+LOCAL_STREAM_DIR = config.DATA_DIR / _FOLDER
+STREAM_DIR = cloudlake.root(LAKE, _FOLDER) if LAKE else LOCAL_STREAM_DIR.as_posix()   # a path or a URL
 
-# reference data from the BATCH silver layer (stream–static joins)
-SILVER_PRODUCTS = config.SILVER_DIR / "products"
-SILVER_RATES = config.SILVER_DIR / "exchange_rates"
+
+def _at(*parts: str) -> str:
+    return "/".join([STREAM_DIR, *parts])
+
+
+LIVE_TABLE = _at("online_orders_live")
+TOTALS_TABLE = _at("sales_per_5_minutes")
+STATUS_TABLE = _at("order_status_current")
+CHECKPOINTS = _at("_checkpoints")                   # one sub-folder per job: its offsets and state
+METRICS_DIR = LOCAL_STREAM_DIR / "_metrics"         # always local: the listener writes plain files
+
+# reference data from the BATCH silver layer (stream–static joins): on the laptop, or (cloud lake)
+# the copies uploaded to abfss://silver@... by LusitaniaAzure/scripts/upload_reference.ps1
+SILVER_PRODUCTS = cloudlake.silver(LAKE, "products") if LAKE else config.SILVER_DIR / "products"
+SILVER_RATES = cloudlake.silver(LAKE, "exchange_rates") if LAKE else config.SILVER_DIR / "exchange_rates"
 
 # --- Tuning -------------------------------------------------------------------------------
 # The two knobs of the performance experiments can be changed without editing code:
@@ -43,4 +54,4 @@ MAX_RATE_AGE_DAYS = 7                # today's rate not loaded yet? use the late
 
 
 def checkpoint(job: str) -> str:
-    return str(CHECKPOINTS / job)
+    return f"{CHECKPOINTS}/{job}"

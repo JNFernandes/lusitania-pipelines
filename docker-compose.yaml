@@ -234,6 +234,11 @@ services:
       # Event Hubs instead of the local Kafka (Project 4), when set in the PowerShell session:
       # see streaming/eventhubs.py. Empty = local Kafka.
       EVENTHUBS_CONNECTION_STRING: ${EVENTHUBS_CONNECTION_STRING:-}
+      # the cloud lake (Project 4, step 8): see streaming/cloudlake.py. Empty = the laptop.
+      LAKE_ACCOUNT: ${LAKE_ACCOUNT:-}
+      LAKE_TENANT_ID: ${LAKE_TENANT_ID:-}
+      LAKE_CLIENT_ID: ${LAKE_CLIENT_ID:-}
+      LAKE_CLIENT_SECRET: ${LAKE_CLIENT_SECRET:-}
       # tuning knobs for the performance experiments (defaults = the normal settings)
       MAX_OFFSETS_PER_TRIGGER: ${MAX_OFFSETS_PER_TRIGGER:-500}
       TRIGGER_INTERVAL: ${TRIGGER_INTERVAL:-10 seconds}

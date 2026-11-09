@@ -1,0 +1,34 @@
+# The streaming CONSUMER as a self-contained image, to run in Azure Container Apps (Project 4).
+#
+# Unlike the Airflow image, nothing is mounted at run time: Project 2's package and this project's
+# streaming code are COPIED IN. cloud/build_consumer_image.ps1 prepares the build folder:
+#     lakehouse/   Project 2 (src/ + pyproject.toml)  → installed as the `lusitania` package
+#     streaming/   this project's producer, consumer, eventhubs.py, cloudlake.py
+FROM python:3.11-slim
+
+# Spark runs on Java (17 on this Debian)
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends default-jre-headless procps \
+ && rm -rf /var/lib/apt/lists/*
+ENV JAVA_HOME=/usr/lib/jvm/default-java
+
+# Project 2 (pyspark, delta-spark, ...)
+COPY lakehouse/ /app/lakehouse/
+RUN pip install --no-cache-dir /app/lakehouse
+
+# Download the connectors NOW (Delta, Kafka, Azure storage), not at every start in the cloud
+RUN python -c "import pyspark; \
+from delta import configure_spark_with_delta_pip; \
+from pyspark.sql import SparkSession; \
+pkgs = ['org.apache.spark:spark-sql-kafka-0-10_2.12:' + pyspark.__version__, 'org.apache.hadoop:hadoop-azure:3.3.4']; \
+configure_spark_with_delta_pip(SparkSession.builder.master('local[1]'), extra_packages=pkgs).getOrCreate().stop()"
+
+COPY streaming/ /app/streaming/
+
+# DATA_DIR: Project 2's local data folder (only the consumer's metrics files land here; the tables
+# go to the cloud lake because LAKE_ACCOUNT is set by Container Apps)
+ENV PYTHONPATH=/app/streaming \
+    DATA_DIR=/app/data \
+    PYTHONUNBUFFERED=1
+WORKDIR /app/streaming
+CMD ["python", "-m", "consumer.main"]

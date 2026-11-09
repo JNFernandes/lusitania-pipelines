@@ -12,24 +12,28 @@ import argparse
 
 import duckdb
 
+import cloudlake
 import eventhubs
 from lusitania import config
 
 STREAM = config.DATA_DIR / eventhubs.stream_folder()   # stream/, or stream_eventhubs/ for a cloud run
+# cloud lake (LAKE_ACCOUNT set): read the same tables from ADLS, logged in as YOU (az login)
+CLOUD_ROOT = cloudlake.root(cloudlake.account(), eventhubs.stream_folder()) if cloudlake.enabled() else None
 
 
 def scan(table: str) -> str:
-    return f"delta_scan('{(STREAM / table).as_posix()}')"
+    location = f"{CLOUD_ROOT}/{table}" if CLOUD_ROOT else (STREAM / table).as_posix()
+    return f"delta_scan('{location}')"
 
 
 def show(cur, title: str, table: str, sql: str) -> None:
     print(f"\n=== {title} ===")
-    if not (STREAM / table / "_delta_log").exists():
+    if not CLOUD_ROOT and not (STREAM / table / "_delta_log").exists():
         print(f"  (not created yet: {table})")
         return
     try:
         result = cur.execute(sql.format(t=scan(table)))
-    except duckdb.BinderException as problem:          # e.g. coupon_code before the first v2 write
+    except duckdb.Error as problem:     # e.g. coupon_code before the first v2 write, a table not there yet
         print(f"  (not available yet: {str(problem).splitlines()[0]})")
         return
     columns = [d[0] for d in result.description]
@@ -61,6 +65,12 @@ def main() -> None:
     cur = con.cursor()
     cur.execute("INSTALL delta")
     cur.execute("LOAD delta")
+    if CLOUD_ROOT:
+        print(f"Reading the cloud lake: {CLOUD_ROOT}")
+        cur.execute("INSTALL azure")
+        cur.execute("LOAD azure")
+        cur.execute(f"CREATE SECRET lake (TYPE azure, PROVIDER credential_chain, CHAIN 'cli', "
+                    f"ACCOUNT_NAME '{cloudlake.account()}')")
     if args.order:
         show_order(cur, args.order)
         con.close()

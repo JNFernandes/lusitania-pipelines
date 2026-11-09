@@ -19,6 +19,7 @@ import time
 import pyspark
 from delta.tables import DeltaTable
 
+import cloudlake
 from consumer import orders, settings, status, totals
 from consumer.metrics import MetricsRecorder
 from lusitania.log import setup_logging
@@ -49,12 +50,19 @@ def schema_changed(error) -> bool:
 
 def main() -> None:
     setup_logging()
-    spark = get_spark("consumer", cores="2", extra_packages=[KAFKA_PACKAGE])
+    packages = [KAFKA_PACKAGE] + ([cloudlake.hadoop_azure_package()] if settings.LAKE else [])
+    spark = get_spark("consumer", cores="2", extra_packages=packages)
+    if settings.LAKE:
+        # log in to the cloud lake as the service principal (OAuth), before anything touches it
+        hadoop = spark.sparkContext._jsc.hadoopConfiguration()
+        for key, value in cloudlake.hadoop_conf(settings.LAKE, *cloudlake.credentials()).items():
+            hadoop.set(key, value)
     # STATE STORE on RocksDB (disk) instead of Java memory: dedup keys and open windows can grow
     spark.conf.set("spark.sql.streaming.stateStore.providerClass",
                    "org.apache.spark.sql.execution.streaming.state.RocksDBStateStoreProvider")
     spark.conf.set("spark.sql.shuffle.partitions", "4")   # fixed in the checkpoint at first start
-    settings.STREAM_DIR.mkdir(parents=True, exist_ok=True)
+    settings.LOCAL_STREAM_DIR.mkdir(parents=True, exist_ok=True)   # metrics stay local in both modes
+    log.info("tables in %s", settings.STREAM_DIR)
     # every micro-batch of every job → one line in data/stream/_metrics (for perf_report.py)
     spark.streams.addListener(MetricsRecorder())
     log.info("settings: maxOffsetsPerTrigger=%s, trigger=%s",
