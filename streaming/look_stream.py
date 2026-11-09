@@ -12,9 +12,10 @@ import argparse
 
 import duckdb
 
+import eventhubs
 from lusitania import config
 
-STREAM = config.DATA_DIR / "stream"
+STREAM = config.DATA_DIR / eventhubs.stream_folder()   # stream/, or stream_eventhubs/ for a cloud run
 
 
 def scan(table: str) -> str:

@@ -29,7 +29,7 @@ log = logging.getLogger(__name__)
 # --- 1. Source ----------------------------------------------------------------------------
 def read_kafka(spark: SparkSession, topic: str) -> DataFrame:
     return (spark.readStream.format("kafka")
-            .option("kafka.bootstrap.servers", settings.KAFKA_BOOTSTRAP)
+            .options(**settings.kafka_options())               # local Kafka or Event Hubs
             .option("subscribe", topic)
             .option("startingOffsets", "earliest")            # first start ever: read everything kept
             .option("maxOffsetsPerTrigger", settings.MAX_OFFSETS_PER_TRIGGER)   # backpressure
@@ -138,7 +138,7 @@ class Sinks:
         # AT-LEAST-ONCE: a replayed micro-batch can write the same DLQ event twice. Whoever reads
         # the DLQ removes repeats by original-partition + original-offset.
         (dlq_records(bad).write.format("kafka")
-            .option("kafka.bootstrap.servers", settings.KAFKA_BOOTSTRAP)
+            .options(**settings.kafka_options())
             .option("topic", settings.DLQ_TOPIC).save())
 
 

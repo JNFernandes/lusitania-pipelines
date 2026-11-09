@@ -1,16 +1,25 @@
 """Every name, path and tuning knob of the consumer, in one place."""
 import os
 
+import eventhubs
 from lusitania import config
 
-# --- Kafka (the INTERNAL door: the consumer runs in a container) -------------------------
-KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "kafka:19092")
+# --- Kafka: local (the INTERNAL door, the consumer runs in a container) or Event Hubs ------
+EVENTHUBS = eventhubs.connection_string()          # empty = local Kafka
+KAFKA_BOOTSTRAP = eventhubs.bootstrap(EVENTHUBS) if EVENTHUBS else os.getenv("KAFKA_BOOTSTRAP", "kafka:19092")
+
+
+def kafka_options() -> dict:
+    """Connection options for every Spark Kafka source and sink."""
+    return eventhubs.spark_options(EVENTHUBS) if EVENTHUBS else {"kafka.bootstrap.servers": KAFKA_BOOTSTRAP}
+
+
 ORDERS_TOPIC = "web_orders"
 STATUS_TOPIC = "order_status"
 DLQ_TOPIC = "web_orders_dlq"
 
 # --- Delta tables: in Project 2's data/ folder, next to bronze and silver ----------------
-STREAM_DIR = config.DATA_DIR / "stream"
+STREAM_DIR = config.DATA_DIR / eventhubs.stream_folder()   # stream/ or stream_eventhubs/
 LIVE_TABLE = STREAM_DIR / "online_orders_live"
 TOTALS_TABLE = STREAM_DIR / "sales_per_5_minutes"
 STATUS_TABLE = STREAM_DIR / "order_status_current"

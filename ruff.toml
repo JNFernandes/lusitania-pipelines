@@ -7,4 +7,4 @@ extend-exclude = ["logs"]
 select = ["E", "W", "F", "I", "B", "UP"]
 
 [lint.isort]
-known-first-party = ["lusitania", "consumer"]
+known-first-party = ["lusitania", "consumer", "eventhubs"]

@@ -30,7 +30,15 @@ import signal
 import time
 from datetime import UTC, datetime, timedelta
 
+import eventhubs  # local Kafka or Event Hubs: one environment variable decides
+
 BOOTSTRAP = "localhost:9092"            # Kafka's EXTERNAL door, for programs on the laptop
+
+
+def connection() -> dict:
+    """Local Kafka, or Event Hubs when EVENTHUBS_CONNECTION_STRING is set (see eventhubs.py)."""
+    conn = eventhubs.connection_string()
+    return eventhubs.client_config(conn) if conn else {"bootstrap.servers": BOOTSTRAP}
 ORDERS_TOPIC = "web_orders"
 STATUS_TOPIC = "order_status"
 SOURCE = "lusitania-webshop"            # header: which system produced the event
@@ -179,14 +187,16 @@ class Sender:
         if not dry_run:
             from confluent_kafka import Producer
             self.producer = Producer({
-                "bootstrap.servers": BOOTSTRAP,
+                **connection(),                  # local Kafka or Event Hubs
+
                 # IDEMPOTENT producer: if a send is retried after a lost acknowledgement, the broker
                 # drops the repeat (producer id + sequence number). The Python client does NOT turn
                 # this on by default, unlike the Java client.
                 "enable.idempotence": True,
                 "acks": "all",                   # confirmed only when all in-sync replicas have it
                 "linger.ms": 20,                 # wait up to 20 ms to send events together (batching)
-                "compression.type": "lz4",       # less data on the network
+                # less data on the network; Event Hubs Standard has no compression (Premium only)
+                "compression.type": "none" if eventhubs.enabled() else "lz4",
             })
 
     def _delivered(self, err, msg):
@@ -236,7 +246,8 @@ def run(args):
     total = args.burst or None
     interval = 0 if args.burst else 1 / args.rate
     started = last_report = time.time()
-    print(f"Sending to {'(dry run)' if args.dry_run else BOOTSTRAP}: "
+    target = "(dry run)" if args.dry_run else connection()["bootstrap.servers"]
+    print(f"Sending to {target}: "
           f"{'burst of ' + str(args.burst) if args.burst else str(args.rate) + ' orders/s'}, "
           f"late {args.late_pct:.0%}, duplicates {args.dup_pct:.0%}, broken {args.bad_pct:.0%}, "
           f"schema v{args.schema_version}. Ctrl+C to stop.")
